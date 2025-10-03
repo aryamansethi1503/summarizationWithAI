@@ -1,0 +1,13 @@
+fastapi[all]
+pymupdf
+Pillow
+pytesseract
+requests
+qdrant-client
+sentence-transformers
+streamlit
+starlette-prometheus
+google-generativeai
+python-dotenv
+pyPDF2
+python-docx
