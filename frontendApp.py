@@ -56,6 +56,8 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "upload_key" not in st.session_state:
     st.session_state.upload_key = 0
+if "last_summary" not in st.session_state:
+    st.session_state.last_summary = None
 
 with st.sidebar:
     st.header("Start New Session")
@@ -66,6 +68,7 @@ with st.sidebar:
                 st.session_state.processed_files = []
                 st.session_state.messages = []
                 st.session_state.upload_key += 1
+                st.session_state.last_summary = None
                 st.success("Ready for new documents.")
                 st.rerun()
             except requests.ConnectionError:
@@ -83,6 +86,7 @@ with st.sidebar:
     if uploaded_files:
         new_files_to_process = [f for f in uploaded_files if f.name not in st.session_state.processed_files]
         if new_files_to_process:
+            st.session_state.last_summary = None
             with st.spinner(f"Processing {len(new_files_to_process)} new file(s)..."):
                 for uploaded_file in new_files_to_process:
                     st.info(f"Processing {uploaded_file.name}...")
@@ -106,14 +110,18 @@ with st.sidebar:
 
     st.divider()
     st.header("Actions")
-    
     if st.session_state.processed_files:
+        st.info("Ready Documents:")
+        for name in st.session_state.processed_files:
+            st.write(f"- {name}")
+        
         if st.button("Generate Synthesis Summary", use_container_width=True, type="primary"):
-            with st.spinner("Generating synthesis summary from all documents..."):
+            with st.spinner("Generating synthesis summary..."):
                 try:
                     response = requests.post(f"{ORCHESTRATOR_URL}/summarize-all/")
                     if response.status_code == 200:
                         summary = response.json().get("summary")
+                        st.session_state.last_summary = summary
                         st.session_state.messages.insert(0, {"role": "assistant", "content": f"**Synthesis Summary:**\n\n{summary}"})
                         st.rerun()
                     else:
@@ -134,6 +142,25 @@ with tab1:
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
+
+    if st.session_state.last_summary:
+        st.divider()
+        col1, col2 = st.columns([3, 1])
+        with col2:
+            if st.button("Translate Summary to Hindi", use_container_width=True):
+                with st.spinner("Translating to Hindi..."):
+                    try:
+                        payload = {"text": st.session_state.last_summary, "language": "Hindi"}
+                        response = requests.post(f"{ORCHESTRATOR_URL}/translate/", json=payload)
+                        if response.status_code == 200:
+                            translated_summary = response.json().get("translated_text")
+                            st.session_state.messages.append({"role": "assistant", "content": f"**Hindi Translation:**\n\n{translated_summary}"})
+                            st.session_state.last_summary = None
+                            st.rerun()
+                        else:
+                            st.error(f"Error during translation: {response.status_code} - {response.text}")
+                    except requests.ConnectionError:
+                        st.error("Connection failed during translation.")
 
     if prompt := st.chat_input("Ask a question about the uploaded documents..."):
         if st.session_state.processed_files:

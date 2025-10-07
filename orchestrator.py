@@ -42,6 +42,10 @@ class TextChunk(BaseModel):
 class ChatQuery(BaseModel):
     query: str
 
+class TranslateRequest(BaseModel):
+    text: str
+    language: str
+
 @app.post("/new-session/")
 async def new_session():
     try:
@@ -81,16 +85,12 @@ async def chat_with_documents(query: ChatQuery):
 
 @app.post("/summarize-all/")
 async def summarize_all_documents():
-    """
-    Generates a synthesis summary for ALL documents in the collection.
-    """
     try:
         all_points, _ = qdrant_client.scroll(
             collection_name=QDRANT_COLLECTION_NAME,
             limit=10000,
             with_payload=True,
         )
-        
         if not all_points:
             raise HTTPException(status_code=404, detail="No documents found in the database to summarize.")
         docs = defaultdict(list)
@@ -103,20 +103,29 @@ async def summarize_all_documents():
         for filename, chunks in docs.items():
             sorted_chunks = sorted(chunks, key=lambda c: c.get('chunk_index', 0))
             full_text = "\n".join([chunk['text'] for chunk in sorted_chunks])
-            
-            prompt = f"Provide a concise summary of the following text from the document '{filename}':\n\n{full_text}"
+            prompt = f"Provide a concise summary of the text from '{filename}':\n\n{full_text}"
             response = model.generate_content(prompt)
             individual_summaries.append(f"Summary for {filename}:\n{response.text}\n")
         
         if len(individual_summaries) > 1:
             all_summaries_text = "\n---\n".join(individual_summaries)
-            synthesis_prompt = f"You are a helpful assistant. Below are several summaries from different documents. Your task is to create a single, overarching 'synthesis' summary that combines the key points from all of them. Mention which documents contributed to the main themes.\n\nIndividual Summaries:\n{all_summaries_text}\n\nOverall Synthesis Summary:"
-            
+            synthesis_prompt = f"Create a single, overarching 'synthesis' summary that combines the key points from the following individual document summaries:\n\n{all_summaries_text}\n\nOverall Synthesis Summary:"
             synthesis_response = model.generate_content(synthesis_prompt)
             final_summary = synthesis_response.text
         else:
             final_summary = individual_summaries[0]
             
         return {"summary": final_summary, "source_documents": list(docs.keys())}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/translate/")
+async def translate_text(request: TranslateRequest):
+    """Translates the given text to the target language."""
+    try:
+        prompt = f"Translate the following text to {request.language}. Output only the translated text and nothing else:\n\n---\n{request.text}\n---"
+        model = genai.GenerativeModel('gemini-2.5-pro')
+        response = model.generate_content(prompt)
+        return {"translated_text": response.text}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
