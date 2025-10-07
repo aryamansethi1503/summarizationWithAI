@@ -6,6 +6,7 @@ import os
 from dotenv import load_dotenv
 import google.generativeai as genai
 import uuid
+from collections import defaultdict
 
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -23,8 +24,6 @@ qdrant_client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
 EMBEDDING_MODEL = SentenceTransformer('all-MiniLM-L6-v2')
 
 def initialize_collection():
-    """Wipes and recreates the collection and its index."""
-    print("Clearing and recreating Qdrant collection for a new session.")
     qdrant_client.recreate_collection(
         collection_name=QDRANT_COLLECTION_NAME,
         vectors_config=models.VectorParams(size=384, distance=models.Distance.COSINE),
@@ -34,7 +33,6 @@ def initialize_collection():
         field_name="filename",
         field_schema=models.PayloadSchemaType.KEYWORD
     )
-    print(f"Collection '{QDRANT_COLLECTION_NAME}' is ready.")
 
 class TextChunk(BaseModel):
     chunk: str
@@ -46,23 +44,20 @@ class ChatQuery(BaseModel):
 
 @app.post("/new-session/")
 async def new_session():
-    """Clears the database for a new session."""
     try:
         initialize_collection()
-        return {"status": "success", "message": "New session started. Database is clear."}
+        return {"status": "success", "message": "New session started."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/upload-chunk/")
 async def upload_text_chunk(item: TextChunk):
-    """Receives and stores a single chunk of text."""
     try:
         vector = EMBEDDING_MODEL.encode(item.chunk).tolist()
-        point_id = str(uuid.uuid4())
         payload = {"text": item.chunk, "filename": item.filename.strip(), "chunk_index": item.chunk_index}
         qdrant_client.upsert(
             collection_name=QDRANT_COLLECTION_NAME,
-            points=[models.PointStruct(id=point_id, vector=vector, payload=payload)],
+            points=[models.PointStruct(id=str(uuid.uuid4()), vector=vector, payload=payload)],
             wait=True,
         )
         return {"status": "success"}
@@ -71,18 +66,57 @@ async def upload_text_chunk(item: TextChunk):
 
 @app.post("/chat/")
 async def chat_with_documents(query: ChatQuery):
-    """Handles question-answering based on a few relevant document chunks."""
     try:
         query_vector = EMBEDDING_MODEL.encode(query.query).tolist()
         search_results = qdrant_client.search(collection_name=QDRANT_COLLECTION_NAME, query_vector=query_vector, limit=5)
-        if not search_results: return {"answer": "The document has not been processed. Please upload a document first."}
-        
+        if not search_results: return {"answer": "Please upload a document first."}
         context = "\n---\n".join([result.payload['text'] for result in search_results])
         filenames = sorted(list(set([result.payload['filename'] for result in search_results])))
         prompt = f"Context:\n---\n{context}\n---\n\nQuestion: {query.query}\n\nAnswer based only on the context:"
-        
         model = genai.GenerativeModel('gemini-2.5-pro')
         response = model.generate_content(prompt)
         return {"answer": response.text, "context_used": filenames}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/summarize-all/")
+async def summarize_all_documents():
+    """
+    Generates a synthesis summary for ALL documents in the collection.
+    """
+    try:
+        all_points, _ = qdrant_client.scroll(
+            collection_name=QDRANT_COLLECTION_NAME,
+            limit=10000,
+            with_payload=True,
+        )
+        
+        if not all_points:
+            raise HTTPException(status_code=404, detail="No documents found in the database to summarize.")
+        docs = defaultdict(list)
+        for point in all_points:
+            docs[point.payload['filename']].append(point.payload)
+        
+        individual_summaries = []
+        model = genai.GenerativeModel('gemini-2.5-pro')
+
+        for filename, chunks in docs.items():
+            sorted_chunks = sorted(chunks, key=lambda c: c.get('chunk_index', 0))
+            full_text = "\n".join([chunk['text'] for chunk in sorted_chunks])
+            
+            prompt = f"Provide a concise summary of the following text from the document '{filename}':\n\n{full_text}"
+            response = model.generate_content(prompt)
+            individual_summaries.append(f"Summary for {filename}:\n{response.text}\n")
+        
+        if len(individual_summaries) > 1:
+            all_summaries_text = "\n---\n".join(individual_summaries)
+            synthesis_prompt = f"You are a helpful assistant. Below are several summaries from different documents. Your task is to create a single, overarching 'synthesis' summary that combines the key points from all of them. Mention which documents contributed to the main themes.\n\nIndividual Summaries:\n{all_summaries_text}\n\nOverall Synthesis Summary:"
+            
+            synthesis_response = model.generate_content(synthesis_prompt)
+            final_summary = synthesis_response.text
+        else:
+            final_summary = individual_summaries[0]
+            
+        return {"summary": final_summary, "source_documents": list(docs.keys())}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

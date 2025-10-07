@@ -34,9 +34,7 @@ def extract_text_from_image(file):
 def extract_text_from_docx(file):
     try:
         doc = Document(file)
-        full_text = []
-        for para in doc.paragraphs:
-            full_text.append(para.text)
+        full_text = [para.text for para in doc.paragraphs]
         return "\n".join(full_text)
     except Exception as e:
         st.error(f"Error reading DOCX file: {e}")
@@ -50,13 +48,12 @@ def extract_text_from_txt(file):
         return None
 
 st.set_page_config(layout="wide")
-st.title("📄 DocQuery AI: Chat with your Document")
+st.title("📄 DocQuery AI: Multi-Document Q&A and Summarization")
 
-if "processed_filename" not in st.session_state:
-    st.session_state.processed_filename = None
+if "processed_files" not in st.session_state:
+    st.session_state.processed_files = []
 if "messages" not in st.session_state:
     st.session_state.messages = []
-
 if "upload_key" not in st.session_state:
     st.session_state.upload_key = 0
 
@@ -66,84 +63,101 @@ with st.sidebar:
         with st.spinner("Starting new session..."):
             try:
                 requests.post(f"{ORCHESTRATOR_URL}/new-session/")
-                st.session_state.processed_filename = None
+                st.session_state.processed_files = []
                 st.session_state.messages = []
                 st.session_state.upload_key += 1
-                st.success("Ready for new document.")
+                st.success("Ready for new documents.")
                 st.rerun()
             except requests.ConnectionError:
                 st.error("Connection failed. Is the orchestrator running?")
 
     st.divider()
-    st.header("Upload Document")
-    uploaded_file = st.file_uploader(
-        "Upload a PDF, DOCX, TXT, or image file",
+    st.header("Upload Documents")
+    uploaded_files = st.file_uploader(
+        "Upload one or more files",
         type=['pdf', 'png', 'jpg', 'jpeg', 'txt', 'docx'],
+        accept_multiple_files=True,
         key=f"uploader_{st.session_state.upload_key}"
     )
 
-    if uploaded_file and (uploaded_file.name != st.session_state.get('processed_filename')):
-        with st.spinner(f"Processing {uploaded_file.name}..."):
-            text = None
-            file_ext = os.path.splitext(uploaded_file.name)[-1].lower()
-
-            if file_ext == ".pdf": text = extract_text_from_pdf(uploaded_file)
-            elif file_ext in [".png", ".jpg", ".jpeg"]: text = extract_text_from_image(uploaded_file)
-            elif file_ext == ".txt": text = extract_text_from_txt(uploaded_file)
-            elif file_ext == ".docx": text = extract_text_from_docx(uploaded_file)
-            
-            if text:
-                chunks = [text[i:i + CHUNK_SIZE_CHARS] for i in range(0, len(text), CHUNK_SIZE_CHARS)]
-                total_chunks = len(chunks)
-                progress_bar = st.progress(0, text=f"Indexing document ({total_chunks} chunks)...")
-                
-                upload_successful = True
-                for i, chunk in enumerate(chunks):
-                    try:
-                        payload = {"chunk": chunk, "filename": uploaded_file.name, "chunk_index": i}
-                        response = requests.post(f"{ORCHESTRATOR_URL}/upload-chunk/", json=payload)
-                        if response.status_code != 200:
-                            st.error(f"Error on chunk {i+1}: {response.text}")
-                            upload_successful = False; break
-                        progress_bar.progress((i + 1) / total_chunks, text=f"Indexing chunk {i+1}")
-                    except requests.ConnectionError:
-                        st.error("Connection failed. Is the orchestrator running?"); upload_successful = False; break
-                
-                if upload_successful:
-                    st.success(f"**{uploaded_file.name}** is ready!")
-                    st.session_state.processed_filename = uploaded_file.name
-                    st.session_state.messages = []
-                    st.rerun()
-            else:
-                st.error("Could not extract text from the document.")
-                st.session_state.processed_filename = None
-
-st.header("Chat with Document")
-
-if st.session_state.processed_filename:
-    st.info(f"Chatting with: **{st.session_state.processed_filename}**")
-else:
-    st.info("Your chat session will appear here once a document is processed.")
-
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-
-if prompt := st.chat_input("Ask a question about the document..."):
-    if st.session_state.processed_filename:
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"): st.markdown(prompt)
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                try:
-                    response = requests.post(f"{ORCHESTRATOR_URL}/chat/", json={"query": prompt})
-                    if response.status_code == 200:
-                        answer = response.json().get("answer", "No answer found.")
-                        st.markdown(answer)
-                        st.session_state.messages.append({"role": "assistant", "content": answer})
+    if uploaded_files:
+        new_files_to_process = [f for f in uploaded_files if f.name not in st.session_state.processed_files]
+        if new_files_to_process:
+            with st.spinner(f"Processing {len(new_files_to_process)} new file(s)..."):
+                for uploaded_file in new_files_to_process:
+                    st.info(f"Processing {uploaded_file.name}...")
+                    text = None
+                    file_ext = os.path.splitext(uploaded_file.name)[-1].lower()
+                    if file_ext == ".pdf": text = extract_text_from_pdf(uploaded_file)
+                    elif file_ext in [".png", ".jpg", ".jpeg"]: text = extract_text_from_image(uploaded_file)
+                    elif file_ext == ".txt": text = extract_text_from_txt(uploaded_file)
+                    elif file_ext == ".docx": text = extract_text_from_docx(uploaded_file)
+                    
+                    if text:
+                        chunks = [text[i:i + CHUNK_SIZE_CHARS] for i in range(0, len(text), CHUNK_SIZE_CHARS)]
+                        for i, chunk in enumerate(chunks):
+                            payload = {"chunk": chunk, "filename": uploaded_file.name, "chunk_index": i}
+                            requests.post(f"{ORCHESTRATOR_URL}/upload-chunk/", json=payload)
+                        st.session_state.processed_files.append(uploaded_file.name)
                     else:
-                        st.error(f"Error: {response.status_code} - {response.text}")
+                        st.error(f"Could not extract text from {uploaded_file.name}.")
+            st.success("All new files processed!")
+            st.rerun()
+
+    st.divider()
+    st.header("Actions")
+    
+    if st.session_state.processed_files:
+        if st.button("Generate Synthesis Summary", use_container_width=True, type="primary"):
+            with st.spinner("Generating synthesis summary from all documents..."):
+                try:
+                    response = requests.post(f"{ORCHESTRATOR_URL}/summarize-all/")
+                    if response.status_code == 200:
+                        summary = response.json().get("summary")
+                        st.session_state.messages.insert(0, {"role": "assistant", "content": f"**Synthesis Summary:**\n\n{summary}"})
+                        st.rerun()
+                    else:
+                        st.error(f"Error during summarization: {response.status_code} - {response.text}")
                 except requests.ConnectionError:
                     st.error("Connection failed.")
     else:
-        st.warning("Please start a new session and upload a document before asking questions.")
+        st.warning("Upload documents to begin.")
+
+tab1, tab2 = st.tabs(["💬 Chat & Results", "🗂️ Processed Files"])
+
+with tab1:
+    if not st.session_state.processed_files:
+        st.info("Your chat session will appear here once documents are processed.")
+    else:
+        st.info(f"Chatting with knowledge from {len(st.session_state.processed_files)} document(s).")
+
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    if prompt := st.chat_input("Ask a question about the uploaded documents..."):
+        if st.session_state.processed_files:
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            with st.chat_message("user"): st.markdown(prompt)
+            with st.chat_message("assistant"):
+                with st.spinner("Thinking..."):
+                    try:
+                        response = requests.post(f"{ORCHESTRATOR_URL}/chat/", json={"query": prompt})
+                        if response.status_code == 200:
+                            answer = response.json().get("answer", "No answer found.")
+                            st.markdown(answer)
+                            st.session_state.messages.append({"role": "assistant", "content": answer})
+                        else:
+                            st.error(f"Error: {response.status_code} - {response.text}")
+                    except requests.ConnectionError:
+                        st.error("Connection failed.")
+        else:
+            st.warning("Please upload documents before asking questions.")
+
+with tab2:
+    st.header("List of Processed Documents")
+    if st.session_state.processed_files:
+        for name in st.session_state.processed_files:
+            st.write(f"- {name}")
+    else:
+        st.info("No documents have been processed in this session.")
