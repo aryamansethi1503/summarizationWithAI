@@ -111,12 +111,8 @@ with st.sidebar:
     st.divider()
     st.header("Actions")
     if st.session_state.processed_files:
-        st.info("Ready Documents:")
-        for name in st.session_state.processed_files:
-            st.write(f"- {name}")
-        
         if st.button("Generate Synthesis Summary", use_container_width=True, type="primary"):
-            with st.spinner("Generating synthesis summary..."):
+            with st.spinner("Generating synthesis summary from all documents..."):
                 try:
                     response = requests.post(f"{ORCHESTRATOR_URL}/summarize-all/")
                     if response.status_code == 200:
@@ -161,15 +157,26 @@ with tab1:
                             st.error(f"Error during translation: {response.status_code} - {response.text}")
                     except requests.ConnectionError:
                         st.error("Connection failed during translation.")
-
-    if prompt := st.chat_input("Ask a question about the uploaded documents..."):
+    
+    prompt_placeholder = "Ask a question or type /challenge <your statement>"
+    if prompt := st.chat_input(prompt_placeholder):
         if st.session_state.processed_files:
             st.session_state.messages.append({"role": "user", "content": prompt})
             with st.chat_message("user"): st.markdown(prompt)
+            
             with st.chat_message("assistant"):
-                with st.spinner("Thinking..."):
+                with st.spinner("Analyzing..."):
                     try:
-                        response = requests.post(f"{ORCHESTRATOR_URL}/chat/", json={"query": prompt})
+                        if prompt.lower().startswith("/challenge "):
+                            statement = prompt[len("/challenge "):].strip()
+                            endpoint = "/challenge/"
+                            payload = {"statement": statement}
+                        else:
+                            endpoint = "/chat/"
+                            payload = {"query": prompt}
+
+                        response = requests.post(f"{ORCHESTRATOR_URL}{endpoint}", json=payload)
+                        
                         if response.status_code == 200:
                             answer = response.json().get("answer", "No answer found.")
                             st.markdown(answer)
@@ -182,9 +189,24 @@ with tab1:
             st.warning("Please upload documents before asking questions.")
 
 with tab2:
-    st.header("List of Processed Documents")
+    st.header("Manage Processed Documents")
     if st.session_state.processed_files:
-        for name in st.session_state.processed_files:
-            st.write(f"- {name}")
+        for name in st.session_state.processed_files[:]:
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                st.write(f"- {name}")
+            with col2:
+                if st.button("Remove", key=f"remove_{name}", use_container_width=True):
+                    with st.spinner(f"Removing {name}..."):
+                        try:
+                            response = requests.post(f"{ORCHESTRATOR_URL}/delete-document/", json={"filename": name})
+                            if response.status_code == 200:
+                                st.session_state.processed_files.remove(name)
+                                st.success(f"Removed {name}.")
+                                st.rerun()
+                            else:
+                                st.error(f"Failed to remove {name}.")
+                        except requests.ConnectionError:
+                            st.error("Connection failed.")
     else:
         st.info("No documents have been processed in this session.")
